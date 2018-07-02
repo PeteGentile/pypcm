@@ -3,9 +3,7 @@ from datetime import datetime
 tstart = datetime.now()
 import matplotlib.pyplot as plt
 import numpy as np
-from explore_polarization import get_stokes_portrait
 from sys import argv
-from tools import align_profiles
 import scipy.optimize as optimize
 import pyfits, pickle, sys, linecache
 
@@ -17,6 +15,43 @@ def PrintException():
     linecache.checkcache(filename)
     line = linecache.getline(filename, lineno, f.f_globals)
     print 'EXCEPTION IN ({}, LINE {} "{}"): {}'.format(filename, lineno, line.strip(), exc_obj)
+
+def get_stokes_portrait(filename):
+	arch = psrchive.Archive_load(filename)
+	arch.convert_state("Stokes")
+	arch.remove_baseline()
+	arch.dedisperse()
+	arch.tscrunch_to_nsub(1)
+	data = arch.get_data()
+	if fscr: arch.fscrunch_to_nchan(1)
+	data = arch.get_data()
+	ints = data[0, 0, :, :]
+	qs = data[0, 1, :, :]
+	us = data[0, 2, :, :]
+	vs = data[0, 3, :, :]
+	weights = arch.get_weights()
+	weighted_intens  = ints*weights.T
+	weighted_qs = qs*weights.T
+	weighted_us = us*weights.T
+	weighted_vs = vs*weights.T
+	return weighted_intens, weighted_qs, weighted_us, weighted_vs, weights
+
+def align_profiles(profiles):
+	template_profile = list(profiles[0])
+	aligned_profiles = [profiles[0]]
+	offsets = [0]
+	for prof in profiles[1:]:
+		correction = 7*len(template_profile)/2048
+		c_vals = np.correlate(template_profile*2, prof*2, mode='full')
+		shift = -np.argmax(c_vals)-1
+		offsets.append(shift)
+		if type(prof) == np.ndarray:
+			aligned_profiles.append(np.roll(prof, -shift))
+		elif type(prof) == list:
+			aligned_profiles.append(prof[shift:] + prof[:shift])
+	
+	return aligned_profiles, offsets	
+
 
 def align_portraits(portraits, shift = None):
 #This takes in two NxM data arrays (Freq, subint vs profile bin)
@@ -295,24 +330,12 @@ def calibrate(params, stokes):
 	stokes_vectors = np.asarray([data_is, data_qs, data_us, data_vs]).reshape(4,nbins)
 	calibrated_stokes = np.dot(inv_mueller,stokes_vectors)
 	#print calibrated_stokes[0].shape
-	'''for i,q,u,v in zip(data_is.squeeze(), data_qs.squeeze(), data_us.squeeze(), data_vs.squeeze()):
-		stokes_vector = np.asarray([i,q,u,v]).reshape(4,1)
-		#ci, cq, cu, cv = inv_mueller*stokes_vector
-		result = np.dot(inv_mueller,stokes_vector)
-		print result[0].shape, stokes_vector.shape, "lol"
-		calibrated_is.append(ci)
-		calibrated_qs.append(cq)
-		calibrated_us.append(cu)
-		calibrated_vs.append(cv)
 
-	print len(calibrated_is)
-	
-	return [calibrated_is, calibrated_qs, calibrated_us, calibrated_vs]'''
 	return calibrated_stokes
 
 def get_mtm_solution(standard_name, data_name, verbose=True, fake=False):
-	standard = get_stokes_portrait(standard_name, 69, fscr = False, tscr = True, title_str = title, plot = False, save = False, ret = True)
-	data = get_stokes_portrait(data_name, 69, fscr = False, tscr = True, title_str = title, plot = False, save = False, ret = True)
+	standard = get_stokes_portrait(standard_name)
+	data = get_stokes_portrait(data_name)
 
 	p_is, p_qs, p_us, p_vs, s_is, s_qs, s_us, s_vs, weights = prepare_data(standard, data)
 
@@ -712,12 +735,4 @@ if __name__ == "__main__":
 	plt.plot(np.sum(calibrated_vs, axis=0), "k--")
 	plt.title("Postcal")
 	plt.show()
-
-
-
-else:
-	print "not main"
-
-
-
 
