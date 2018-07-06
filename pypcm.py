@@ -17,79 +17,76 @@ def PrintException():
     print 'EXCEPTION IN ({}, LINE {} "{}"): {}'.format(filename, lineno, line.strip(), exc_obj)
 
 def get_stokes_portrait(filename):
+#This takes in a string filename of a PSRCHIVE file, and returns the tscrunched stokes
+#parameters of each channel.
+	#Load the file as a PSRCHIVE archive
 	arch = psrchive.Archive_load(filename)
+	
+	#Convert to stokes, remove the baseline, and dedisperse
 	arch.convert_state("Stokes")
 	arch.remove_baseline()
 	arch.dedisperse()
+	
+	#We're just going to do a channel-by-channel comparison of the polarization profiles
+	#so we don't need subint information
 	arch.tscrunch_to_nsub(1)
-	data = arch.get_data()
-	if fscr: arch.fscrunch_to_nchan(1)
+	
+	#Actually get the data cube, and get the stokes params from the data cube.
+	#Data indices are [subint, stokes param, chan, bin].
 	data = arch.get_data()
 	ints = data[0, 0, :, :]
 	qs = data[0, 1, :, :]
 	us = data[0, 2, :, :]
 	vs = data[0, 3, :, :]
+	
+	#Get profile weights, and apply them to the data.
+	#This is essentially applying the RFI zap.
 	weights = arch.get_weights()
 	weighted_intens  = ints*weights.T
 	weighted_qs = qs*weights.T
 	weighted_us = us*weights.T
 	weighted_vs = vs*weights.T
+	
+	#Return the "zapped" Stokes params
 	return weighted_intens, weighted_qs, weighted_us, weighted_vs, weights
 
 def align_profiles(profiles):
+#This aligns all of the profiles (specified as a list) to the first profile in the list
+#It returns the aligned profiles, as well as the amount the profiles needed to be
+#shifted in order to align them.
+	
+	#Call the first profile the "template" profile.
 	template_profile = list(profiles[0])
+	
+	#Since we're aligning all the given profiles to this profile, we can just add it
+	#to the final aligned list right away
 	aligned_profiles = [profiles[0]]
+	
+	#and specify its offset as 0
 	offsets = [0]
+	
+	#For the rest of the profiles, we'll actually need to align them
 	for prof in profiles[1:]:
-		correction = 7*len(template_profile)/2048
+		#We're just going to cross-correlate the given profile with the template profile
 		c_vals = np.correlate(template_profile*2, prof*2, mode='full')
+		
+		#and find the max of the cross-correlation
 		shift = -np.argmax(c_vals)-1
+		
+		#This is the offset, by which we'll actually need to rotate the profile to align it
 		offsets.append(shift)
+		
+		#Then we need to actually shift the profile. This handles both lists and np arrays
 		if type(prof) == np.ndarray:
 			aligned_profiles.append(np.roll(prof, -shift))
 		elif type(prof) == list:
 			aligned_profiles.append(prof[shift:] + prof[:shift])
 	
+	#Return the aligned profiles and the offsets
 	return aligned_profiles, offsets	
 
-
-def align_portraits(portraits, shift = None):
-#This takes in two NxM data arrays (Freq, subint vs profile bin)
-#scrunches them into profiles, uses align_profiles to align them,
-#then returns the aligned NxM arrays.
-#Alternatively, you can tell it how much to shift the arrays.
-#align_profiles cross-correlates the profiles to align them
-	profile1 = np.sum(portraits[0], axis = 0)
-	profile2 = np.sum(portraits[1], axis = 0)
-
-	if shift == None:
-		profiles, shift = align_profiles([profile1, profile2])
-		real_shift = shift[1]%len(profile1)
-		shifted_portrait1 = portraits[0]
-		shifted_portrait2 = np.roll(portraits[1], -real_shift, axis = 1)
-		profile1 = np.roll(profile1, shift[0])
-		prof_diffs = profile1-profile2
-		return [shifted_portrait1, shifted_portrait2], -shift[1]
-	else:
-		shifted_portrait1 = np.roll(portraits[0], shift, axis = 1)
-		shifted_portrait2 = portraits[1]
-		profile1 = np.roll(profile1, shift)
-		prof_diffs = profile1-profile2
-		return [shifted_portrait1, shifted_portrait2]
-
-def align_profs(portraits, shift = None):
-#Calls 'align_profiles' in a smart way (i.e. giving 
-#the user the option to hard code a shift amount.
-	profile1, profile2 = portraits
-	
-	if shift == None:
-		profiles, shift = align_profiles([profile1, profile2])
-		return profiles, -shift[1]
-	else:
-		profile2 = np.roll(profile2, shift,axis=1)
-		return [profile1, profile2]
-
 def center_prof(profs):
+#This just rotates the profile so the max total intensity is in the center
 	i, q, u, v, w = profs
 	max_index = np.argmax(i[0])
 	nbins = len(i[0])
@@ -119,12 +116,20 @@ def make_weights(portrait):
 	return weights
 
 def reduce_portraits(portraits):
-#Takes in NxM data arrays, aligns them, then zaps them.
+#Takes in NxM data arrays, aligns them, then zaps them
+#using other methods. First, align and scale the portraits
 	aligned_ps = align_portraits(scale_portraits(portraits))
 	p1, p2 = aligned_ps
+	
+	#Then get the channel weights
 	weights1 = make_weights(p1)
 	weights2 = make_weights(p2)
+	
+	#Make sure if a channel is zapped in *either* portrait
+	#it gets zapped in *both*
 	weights = weights1*weights2
+	
+	#Actually apply the weights and return
 	final_portrait1 = (weights * p1.T).T
 	final_portrait2 = (weights * p2.T).T
 	return final_portrait1, final_portrait2
@@ -140,6 +145,8 @@ def get_on_pulse_phases(profile):
 def interpolate_profs(data, factor):
 #Uses numpy's interp function (linear interpolation) to interpolate
 #each channel of freq vs phase bin data, then returns the interpolated array
+#This would be useful if you're trying to use this code with two profiles
+#that have different numbers of bins
 	phases = np.linspace(0,data.shape[1], data.shape[1])
 	new_phases = np.linspace(0,data.shape[1], data.shape[1]*factor)
 	new_data = []
@@ -171,27 +178,15 @@ def prepare_data(standard, data):
 	#Make the invariant intervals for the total template and data files
 	data_invariant_intervals = p_is**2 - (p_qs**2 + p_us**2 + p_vs**2)
 	template_invariant_intervals = s_is**2 - (s_qs**2 + s_us**2 + s_vs**2)
-
-	#THIS CODE ONLY MAKES SENSE FOR 1713 AT LBAND WITH 2048 PROFILE BINS
-	#The bin numbers in ^this case are 1018:1126
-	'''if src == "1713":
-		template_chan_weights = np.sum(template_invariant_intervals[:,1018:1126], axis=1)
-		data_chan_weights = np.sum(data_invariant_intervals[:,1018:1126], axis=1)
-	elif src == "1937":
-		template_chan_weights = np.sum(template_invariant_intervals[:,1775:1915], axis=1)
-		data_chan_weights = np.sum(data_invariant_intervals[:,1775:1915], axis=1)
-	else:
-		print "Source not recognized."
-		exit(0)'''
 	
+	#Get the on pulse indices
 	on_indices = get_on_indices([p_is, p_qs, p_us, p_vs, s_is, s_qs, s_us, s_vs], num = len(t_prof)/20)
 	off_indices = get_off_indices(np.sum(p_is, axis=0), np.sum(s_is, axis=0))
 	
+	#Find out how bright each ON PULSE REGION of the invariant interval is for each freq channel
 	template_chan_weights = np.sum(template_invariant_intervals[:,on_indices], axis=1)
 	data_chan_weights = np.sum(data_invariant_intervals[:,on_indices], axis=1)
 	
-	#Find out how bright each ON PULSE REGION of the invariant interval is for each freq channel
-
 	#Scale each Freq channel so that the invariant intervals have the same area underneath for the template and data
 	scale_factors = np.nan_to_num(np.true_divide(template_chan_weights,data_chan_weights))
 
@@ -224,6 +219,7 @@ def get_on_indices(data, method='pol', num=100):
 #This return the top "num" phase bins. Note that this does not choose the top
 #bins in a particular data set, but rather from the product of two datasets.
 #Hopefully, this will mitigate the code from choosing anomalous spikes in unclean data.
+#Also note that this then assumes the profiles have been aligned.
 	p_is, p_qs, p_us, p_vs, s_is, s_qs, s_us, s_vs = [np.sum(x, axis=0) for x in data]
 	if method == 'pol':
 		p_pol = p_qs**2 + p_us**2 + p_vs**2
@@ -236,6 +232,8 @@ def get_on_indices(data, method='pol', num=100):
 
 def get_off_indices(intens1, intens2, window=100):
 #Stolen from M Lam. Credit to him.
+#This method just looks for the phase window of width "window"
+#with the minimum total intensity
 	integral = np.zeros_like(intens1)
 	nbins = len(intens1)
 	data = intens1*intens2
@@ -249,7 +247,12 @@ def get_off_indices(intens1, intens2, window=100):
 
 def receiver_transform(params, stokes):
 #Poorly named, perhaps, but this function takes in receiver params
+#It actually makes the mueller matrix from the receiver params
+	#First define all the params
 	theta1, theta2, eps1, eps2, phi, gamma = params
+	
+	#Then define secondary params. These are just convenient
+	#combinations of the receiver params given above
 	A = eps1*np.cos(theta1) + eps2*np.cos(theta2)
 	B = eps1*np.sin(theta1) + eps2*np.sin(theta2)
 	C = eps1*np.cos(theta1) - eps2*np.cos(theta2)
@@ -260,12 +263,26 @@ def receiver_transform(params, stokes):
 	H = 1
 	I = 0
 	resids = 0
+	
+	#For clarity, let's define separate Mueller matrices for different components of the
+	#signal path from the source through the receiver. 
+	
+	#We have the Mueller Matrix for the amplifier chain
 	Mamp = np.asarray([[1, E, 0, 0], [E, 1, 0, 0], [0, 0, F, -G], [0, 0, G, F]])
+	
+	#The cross-coupling
 	Mcc = np.asarray([[1,0,A,B],[0, 1, C, D],[A, -C, 1, 0],[B, -D, 0, 1]])
+	
+	#And then the feed. Note this is just the identity matrix since this code assumes the 
+	#data have been calibrated with the IFA, which, when performed with PSRCHIVE,
+	#will have already corrected for this
 	Mfeed = np.asarray([[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]])
-	#mueller = np.asarray([1, E, A+E*C, B+E*D, E, H, A+E*C, E*B+D, A*F-G*B, G*D-F*C, F, -G, A*G+B*F, -G*C-F*D, G, F*H]).reshape(4,4)
+	
+	#Then we multiply these matrices together to get the full Mueller matrix
 	mueller = np.dot(np.dot(Mamp, Mcc), Mfeed)
-	#imuell = np.linalg.inv(mueller)
+	
+	#Now, we're going to actually apply the Mueller matrix transformation to the given data
+	#and compare the result to the template data, returning residuals to be minim
 	data_is, data_qs, data_us, data_vs, template_is, template_qs, template_us, template_vs  = stokes
 	for i in range(len(data_is)):
 		S_int = np.asarray([template_is[i], template_qs[i], template_us[i], template_vs[i]]).reshape(4,1)
@@ -275,6 +292,11 @@ def receiver_transform(params, stokes):
 	return resids
 
 def receiver_func(stokes_intrinsic, theta1, theta2, eps1, eps2, phi, gamma):
+#This function takes in stokes parameters and receiver parameters and applies the resulting
+#Mueller matrix to the given stokes parameters, returning the resulting stokes parameters.
+	
+	#First define secondary parameters from the receiver params. These are just convenient
+	#combinations of the receiver params given above.
 	A = eps1*np.cos(theta1) + eps2*np.cos(theta2)
 	B = eps1*np.sin(theta1) + eps2*np.sin(theta2)
 	C = eps1*np.cos(theta1) - eps2*np.cos(theta2)
@@ -284,32 +306,66 @@ def receiver_func(stokes_intrinsic, theta1, theta2, eps1, eps2, phi, gamma):
 	G = np.sin(phi)
 	H = 1
 	I = 0
+	
+	#For clarity, let's define separate Mueller matrices for different components of the
+	#signal path from the source through the receiver. 
+	
+	#We have the Mueller Matrix for the amplifier chain
 	Mamp = np.asarray([[1, E, 0, 0], [E, 1, 0, 0], [0, 0, F, -G], [0, 0, G, F]])
+	
+	#The cross-coupling
 	Mcc = np.asarray([[1,0,A,B],[0, 1, C, D],[A, -C, 1, 0],[B, -D, 0, 1]])
+	
+	#And then the feed. Note this is just the identity matrix since this code assumes the 
+	#data have been calibrated with the IFA, which, when performed with PSRCHIVE,
+	#will have already corrected for this
 	Mfeed = np.asarray([[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]])
+	
+	#Then we multiply these matrices together to get the full Mueller matrix
 	mueller = np.dot(np.dot(Mamp, Mcc), Mfeed)
+	
+	#Get the total number of bins
 	n_on_bins = len(stokes_intrinsic)/4
+	
+	#Separate the Stokes parameters from the input data
 	data_is, data_qs, data_us, data_vs  = stokes_intrinsic.reshape((4,n_on_bins))
+	
+	#Define outputs
 	out_is = []
 	out_qs = []
 	out_us = []
 	out_vs = []
+	
+	#We'll need this to return output Stokes params in the same shape as the input Stokes params
 	n_data_points = 4*len(data_is)
+	
+	#Transform each Stokes bin using the Mueller matrix
 	for i in range(len(data_is)):
+		#Make a stokes vector
 		S_int = np.asarray([data_is[i], data_qs[i], data_us[i], data_vs[i]]).reshape(4,1)
+		
+		#Apply the Mueller matrix
 		S_out = np.dot(mueller,S_int)
 		out_is.append(S_out[0])
 		out_qs.append(S_out[1])
 		out_us.append(S_out[2])
 		out_vs.append(S_out[3])
+	
+	#Numpy arrays are great
 	out_is = np.asarray(out_is)
 	out_qs = np.asarray(out_qs)
 	out_us = np.asarray(out_us)
 	out_vs = np.asarray(out_vs)
+	
+	#Make the output the same shape as the input
 	out_stokes = np.asarray([out_is, out_qs, out_us, out_vs])
 	return out_stokes.squeeze().reshape((n_data_points,))
 
 def calibrate(params, stokes):
+#This is very similar to the receiver_func method, so refer to that for more info,
+#but the basic idea is that normally, the Mueller matrix acts on the intrinsic stokes params,
+#but when we calibrate, we want to undo that, so we need to multiply the *measured* stokes params
+#by the *inverse* of the mueller matrix.
 	#stokes is i,q,u,v for a whole channel
 	theta1, theta2, eps1, eps2, phi, gamma = params
 	A = eps1*np.cos(theta1) + eps2*np.cos(theta2)
@@ -323,27 +379,41 @@ def calibrate(params, stokes):
 	I = 0
 
 	mueller = np.asarray([1, E, A+E*C, B+E*D, E, H, A+E*C, E*B+D, A*F-G*B, G*D-F*C, F, -G, A*G+B*F, -G*C-F*D, G, F*H]).reshape(4,4)
+	
+	#This is the only part that is meaningfully different from recevier_func. 
+	#Here, we get the inverse of the Mueller matrix
 	inv_mueller = np.linalg.inv(mueller)
+	
 	nbins = len(stokes[0])
 	data_is, data_qs, data_us, data_vs = stokes
 	calibrated_is, calibrated_qs, calibrated_us, calibrated_vs  = [[],[],[],[]]
 	stokes_vectors = np.asarray([data_is, data_qs, data_us, data_vs]).reshape(4,nbins)
-	calibrated_stokes = np.dot(inv_mueller,stokes_vectors)
-	#print calibrated_stokes[0].shape
 
+	#Actually calibrate
+	calibrated_stokes = np.dot(inv_mueller,stokes_vectors)
+	
+	#Return the calibrated data
 	return calibrated_stokes
 
 def get_mtm_solution(standard_name, data_name, verbose=True, fake=False):
+#This is the main method in the code. It takes in data, performs the METM fit,
+#keeps track of GOF meaasures, prints out similar things to PSRCHIVE's pcm,
+#and actually calibrates the data.
+	
+	#Read in data and get portrait
 	standard = get_stokes_portrait(standard_name)
 	data = get_stokes_portrait(data_name)
-
+	
+	#Massage data
 	p_is, p_qs, p_us, p_vs, s_is, s_qs, s_us, s_vs, weights = prepare_data(standard, data)
-
+	
+	#Get on pulse indices and invariant intervals for template and data
 	on_indices = get_on_indices([p_is, p_qs, p_us, p_vs, s_is, s_qs, s_us, s_vs])
 	off_indices = get_off_indices(np.sum(p_is, axis=0), np.sum(s_is, axis=0))
-
 	data_invariant_intervals = p_is**2 - (p_qs**2 + p_us**2 + p_vs**2)
 	template_invariant_intervals = s_is**2 - (s_qs**2 + s_us**2 + s_vs**2)
+	
+	#We want to keep track of these
 	receiver_params = []
 	receiver_param_errs = []
 	valid_chans = []
@@ -351,89 +421,115 @@ def get_mtm_solution(standard_name, data_name, verbose=True, fake=False):
 	nbins = len(p_is[0,:])
 	n_on_bins = len(on_indices)
 	n_data_points = 4*n_on_bins
-
+	
+	#Keep track of run time
 	tstart = datetime.now()
 	nfails = 0
-	blah = -500.0
-	for i in range(len(s_is[:,0])):
-		if fake:
-			calibrated_is.append([0]*nbins)
-			calibrated_qs.append([0]*nbins)
-			calibrated_us.append([0]*nbins)
-			calibrated_vs.append([0]*nbins)
-			receiver_params.append([0.0,0.0,0.0,0.0,0.0,0.0])
-			receiver_param_errs.append([1.0,1.0,1.0,1.0,1.0,1.0])
-			valid_chans.append(i)
-		else:
-			if weights[i]:
-				stokes_int = np.asarray([s_is[i,on_indices], s_qs[i,on_indices], s_us[i,on_indices], s_vs[i,on_indices]]).reshape((n_data_points,))
-				stokes_out = np.asarray([p_is[i,on_indices], p_qs[i,on_indices], p_us[i,on_indices], p_vs[i,on_indices]]).reshape((n_data_points,))
-				p_err = np.std(p_is[i,off_indices])
-				s_err = np.std(s_is[i,off_indices])
-				if p_err>s_err: prof_err = p_err
-				else: prof_err = s_err
-				p0 = [0,0,0,0,0,0]
-				try:
-					popt, pcov = optimize.curve_fit(receiver_func, stokes_int, stokes_out, bounds = ((-np.pi/2.0, -np.pi/2.0, -np.pi/2.0, -np.pi/2.0, -np.pi, -np.pi/2.0),(np.pi/2.0, np.pi/2.0, np.pi/2.0, np.pi/2.0, np.pi, np.pi/2.0)))
-					receiver_params.append(popt)
-					resids = np.asarray(stokes_out) - np.asarray(receiver_func(stokes_int, *popt))
-					redchisqs = np.sum(resids**2)/((len(on_indices)*4 - len(popt))*(prof_err**2))
-					receiver_param_errs.append([pcov[0,0]*redchisqs, pcov[1,1]*redchisqs, pcov[2,2]*redchisqs, pcov[3,3]*redchisqs, pcov[4,4]*redchisqs, pcov[5,5]*redchisqs])
-					if verbose:
-						if i<10: print "Channel  ", i, "solved,", redchisqs
-						elif i<100: print "Channel ", i, "solved,", redchisqs
-						else: print "Channel", i, "solved,", redchisqs
-					cal = calibrate(popt, [p_is[i,:], p_qs[i,:], p_us[i,:], p_vs[i,:]])
-					#print "Chan", i, "lendata:", len(p_is[i,:]), "lencal:", len(cal[0])
-					calibrated_is.append(cal[0])
-					calibrated_qs.append(cal[1])
-					calibrated_us.append(cal[2])
-					calibrated_vs.append(cal[3])
-					valid_chans.append(i)
-				except Exception as e:
-					#PrintException()
-					if verbose:
-						if i<10: print "Channel  ", i, "failed:", e
-						elif i<100: print "Channel ", i, "failed:", e
-						else: print "Channel", i, "failed:", e
-					calibrated_is.append([0]*nbins)
-					calibrated_qs.append([0]*nbins)
-					calibrated_us.append([0]*nbins)
-					calibrated_vs.append([0]*nbins)
-					receiver_params.append([0,0,0,0,0,0])
-					receiver_param_errs.append([0,0,0,0,0,0])
-					nfails +=1
 	
-			else:
+	#We're going to run the METM code for every channel
+	for i in range(len(s_is[:,0])):
+		#If the channel is not zapped, we actually want to do stuff.
+		if weights[i]:
+			#Get stokes in and out and make sure they're the right shape
+			stokes_int = np.asarray([s_is[i,on_indices], s_qs[i,on_indices], s_us[i,on_indices], s_vs[i,on_indices]]).reshape((n_data_points,))
+			stokes_out = np.asarray([p_is[i,on_indices], p_qs[i,on_indices], p_us[i,on_indices], p_vs[i,on_indices]]).reshape((n_data_points,))
+			
+			#Get off pulse std
+			p_err = np.std(p_is[i,off_indices])
+			s_err = np.std(s_is[i,off_indices])
+			
+			#Keep the larger of the two
+			if p_err>s_err: prof_err = p_err
+			else: prof_err = s_err
+			
+			#Make the initial guess for the rcvr params to be 0 (ie MEM was perfect)
+			p0 = [0,0,0,0,0,0]
+			try:
+				#Find best fit rcvr params
+				popt, pcov = optimize.curve_fit(receiver_func, stokes_int, stokes_out, bounds = ((-np.pi/2.0, -np.pi/2.0, -np.pi/2.0, -np.pi/2.0, -np.pi, -np.pi/2.0),(np.pi/2.0, np.pi/2.0, np.pi/2.0, np.pi/2.0, np.pi, np.pi/2.0)))
+				
+				#Save the rcvr params for this channel
+				receiver_params.append(popt)
+				
+				#Get the template/calibrated profile resids
+				resids = np.asarray(stokes_out) - np.asarray(receiver_func(stokes_int, *popt))
+				
+				#Calculate the reduced chisq and get rcvr errs
+				redchisqs = np.sum(resids**2)/((len(on_indices)*4 - len(popt))*(prof_err**2))
+				receiver_param_errs.append([pcov[0,0]*redchisqs, pcov[1,1]*redchisqs, pcov[2,2]*redchisqs, pcov[3,3]*redchisqs, pcov[4,4]*redchisqs, pcov[5,5]*redchisqs])
+				
+				#Print output similar to PSRCHIVE's pcm
 				if verbose:
-					if i<10: print "Channel  ", i, "skipped"
-					elif i<100: print "Channel ", i, "skipped"
-					else: print "Channel", i, "skipped"
+					if i<10: print "Channel  ", i, "solved,", redchisqs
+					elif i<100: print "Channel ", i, "solved,", redchisqs
+					else: print "Channel", i, "solved,", redchisqs
+				
+				#Actually calibrate the input data with the best fit Mueller matrix
+				cal = calibrate(popt, [p_is[i,:], p_qs[i,:], p_us[i,:], p_vs[i,:]])
+				calibrated_is.append(cal[0])
+				calibrated_qs.append(cal[1])
+				calibrated_us.append(cal[2])
+				calibrated_vs.append(cal[3])
+				
+				#Keep track of valid (unzapped) channels
+				valid_chans.append(i)
+				
+			#This could fail for different reasons, but we don't want to stop the whole process
+			#if it does, so we'll mark the channel as failed and move on
+			except Exception as e:
+				#Print output similar to PSRCHIVE's pcm
+				if verbose:
+					if i<10: print "Channel  ", i, "failed:", e
+					elif i<100: print "Channel ", i, "failed:", e
+					else: print "Channel", i, "failed:", e
+				
+				#Store 0's for the output data, and rcvr params
 				calibrated_is.append([0]*nbins)
 				calibrated_qs.append([0]*nbins)
 				calibrated_us.append([0]*nbins)
 				calibrated_vs.append([0]*nbins)
 				receiver_params.append([0,0,0,0,0,0])
 				receiver_param_errs.append([0,0,0,0,0,0])
-
-
-			tdone = datetime.now()
-		if verbose: print "Solved and calibrated in", tdone-tstart
-		if nfails: print "Solve failed for", nfails, "channels"
-		else: print "Generated MTM solution with no failed channels."
-
+				
+				#Keep track of how many channels failed
+				nfails +=1
+		
+		#If the channel was zapped
+		else:
+			#Print output similar to PSRCHIVE's pcm
+			if verbose:
+				if i<10: print "Channel  ", i, "skipped"
+				elif i<100: print "Channel ", i, "skipped"
+				else: print "Channel", i, "skipped"
+			
+			#Store 0's for the output data, and rcvr params
+			calibrated_is.append([0]*nbins)
+			calibrated_qs.append([0]*nbins)
+			calibrated_us.append([0]*nbins)
+			calibrated_vs.append([0]*nbins)
+			receiver_params.append([0,0,0,0,0,0])
+			receiver_param_errs.append([0,0,0,0,0,0])
+		
+	#Tell the user how long it took to run, and if some chans failed, how many.
+	tdone = datetime.now()
+	if verbose: print "Solved and calibrated in", tdone-tstart
+	if nfails: print "Solve failed for", nfails, "channels"
+	else: print "Generated MTM solution with no failed channels."
+	
+	#Numpy arrays are great
 	calibrated_is = np.asarray(calibrated_is)
 	calibrated_qs = np.asarray(calibrated_qs)
 	calibrated_us = np.asarray(calibrated_us)
 	calibrated_vs = np.asarray(calibrated_vs)
-	new = np.asarray(calibrated_is)
-
 	receiver_params = np.asarray(receiver_params)
 	receiver_param_errs = np.asarray(receiver_param_errs)
-	print receiver_params.shape
+	
+	#Return the results of the fit
 	return np.asarray([s_is, s_qs, s_us, s_vs]), np.asarray([p_is, p_qs, p_us, p_vs]), np.asarray([calibrated_is, calibrated_qs, calibrated_us, calibrated_vs]), valid_chans, receiver_params,receiver_param_errs
 
 def write_pcm(sfname, receiver_params, valid_chans, outname = "pcm.fits", fake=False):
+#This method writes out the receiver parameters into a file that's readable/usable by PSRCHIVE.
+#Most of it is getting the header/data formatting correct, so it's not very enlightening, but it is useful.
 	shdulist = pyfits.open(sfname)
 	head = shdulist[0].header
 	head['OBS_MODE'] = "PCM"
@@ -441,21 +537,10 @@ def write_pcm(sfname, receiver_params, valid_chans, outname = "pcm.fits", fake=F
 	prihdu = pyfits.PrimaryHDU(header=head)
 	new_hdulist = pyfits.BinTableHDU(header=shdulist[1].header, data=shdulist[1].data,name=shdulist[1].name)
 	chans = np.linspace(head['OBSFREQ']-head['OBSBW']/2.0, head['OBSFREQ']+head['OBSBW']/2.0, nchan, dtype='d')
-	#receiver_params[:,[0,5]] = receiver_params[:,[5,0]]
-	#receiver_params[:,[1,2]] = receiver_params[:,[2,1]]
-	#receiver_params[:,[2,3]] = receiver_params[:,[3,2]]
-	#receiver_params[:,[3,4]] = receiver_params[:,[3,4]]
-	#receiver_params[:,5] = np.true_divide(receiver_params[:,5],10.0)
 	weights = np.zeros(nchan)
 	weights[valid_chans] = 1
 	Gs = weights.reshape(nchan,1)
 	expanded_receivers = np.zeros(nchan*6).reshape(nchan,6)
-	'''for i in chanlist:	
-		if i in valid_chans:
-			expanded_receivers[i] = receiver_params[vchan,:]
-			vchan -= 1
-	
-	'''
 	vchan = 0
 	for i in range(nchan):	
 		if i in valid_chans:
@@ -520,6 +605,10 @@ def write_pcm(sfname, receiver_params, valid_chans, outname = "pcm.fits", fake=F
 	hdus.writeto(outname, clobber=True)
 
 def clean_receiver_params(params,errs,caldata,vchans):
+#Sometimes the METM method "works" (ie the fit returns bestfit params and errs), but
+#the returned params are junk (if, for example, there are channels with some unzapped RFI).
+#In these cases, the errors are enormous. This method looks for these cases and effectively
+#zaps the data (sets rcvr params, errs to 0 and calibrated data to 0 in those chans).
 	cparams = []
 	cerrs = []
 	cvchans = []
@@ -530,11 +619,15 @@ def clean_receiver_params(params,errs,caldata,vchans):
 	ccvs = []
 	ccaldata = []
 	zap = False
-	ngood = 0	
+	ngood = 0
+	
+	#Look at all channels
 	for i in range(len(errs)):
+		#Look for big errors in the rcvr params
 		if (errs[i,:-1] > 5.5).sum() > 0.5 or errs[i,-1] > 1:
 			zap = True
 		
+		#If found, set relevant params to 0.
 		if zap:
 			cparams.append([0,0,0,0,0,0])
 			cerrs.append([0,0,0,0,0,0])
@@ -543,6 +636,8 @@ def clean_receiver_params(params,errs,caldata,vchans):
 			ccus.append(np.zeros_like(cus[i]))
 			ccvs.append(np.zeros_like(cvs[i]))
 			print "Zapped channel", i
+		
+		#Else, keep the old params
 		else:
 			cparams.append(params[i])
 			cerrs.append(errs[i])
@@ -550,13 +645,14 @@ def clean_receiver_params(params,errs,caldata,vchans):
 			ccqs.append(cqs[i])
 			ccus.append(cus[i])
 			ccvs.append(cvs[i])
+			
+		#Keep track of the valid chans
+		#(that is, remove "unclean" chans from list of valid chans)
 		if np.sum(cparams[i]):
 			cvchans.append(i)
 		zap = False
 	
-	#cvchans = np.copy(errs[:,0])
-	#cvchans[cvchans!=0] = 1
-	#cvchans[cvchans==0] = 0
+	#Numpy arrays are great
 	cparams = np.asarray(cparams)
 	cerrs = np.asarray(cerrs)
 	cvchans = np.asarray(cvchans)
@@ -565,15 +661,10 @@ def clean_receiver_params(params,errs,caldata,vchans):
 
 if __name__ == "__main__":
 	args = argv[1:]
-	index = 69
-	fscrunch = False
-	tscrunch = False
-	save_image = False
 	overlay_profs = False
 	seperate_stokes = False
 	plot = True
 	plotpa = False
-	title = "Stokes Portrait"
 	files = []
 	verbose = False
 	usepickle = True
@@ -602,85 +693,58 @@ if __name__ == "__main__":
 		elif arg in ["-freq","-cfreq"]:
 			cfreq = float(args[i+1])
 
-	#elif len(files) != 2:
-	#	print "You must pecify two and only two files to compare!"
-	#	exit(0)
-
-	#try:
 	factor = 4
 	prof_diffs = []
 	mjds = []
 	std_statistics = []
+	
+	#Fake just returns rcvr params = 0, errs = 1, and outputs an "identity" Mueller matrix
+	#that is compatible with PSRCHIVE
 	if fake:
 		prepd_s_data, prepd_p_data, calibrated_data, valid_chans, receiver_params, receiver_param_errs = get_mtm_solution(files[0], files[1], verbose, fake=True)
-		
 		write_pcm(files[0], receiver_params, valid_chans, "identity.pcm", fake=fake)
-		
-		'''receiver_params, receiver_param_errs, calibrated_data, valid_chans = clean_receiver_params(receiver_params, receiver_param_errs, calibrated_data, valid_chans)
-		s_is, s_qs, s_us, s_vs = prepd_s_data
-		p_is, p_qs, p_us, p_vs = prepd_p_data
-		calibrated_is, calibrated_qs, calibrated_us, calibrated_vs = calibrated_data
-		bw = 800.0
-		nchan = len(np.sum(s_is,axis=1))
-		chan_bw = 800.0/nchan
-		calibrated_is, calibrated_qs, calibrated_us, calibrated_vs = calibrated_data
-		freqs = np.linspace(cfreq+400-(chan_bw/2.0),cfreq-400+(chan_bw/2.0),nchan)
-		
-		outpickle_name = ".".join(files[-1].split(".") + ["pickle"])
-		outcal = ".".join(files[-1].split(".") + ["calibpickle"])
-		outpcm = ".".join(files[-1].split(".") + ["pcmpickle"])
-		with  open(outpickle_name, "wb") as pfile:
-			pickle.dump([prepd_s_data, prepd_p_data, calibrated_data, freqs, receiver_params, receiver_param_errs], pfile, protocol=pickle.HIGHEST_PROTOCOL)
-		with open(outcal, "wb") as pfile:
-			pickle.dump([prepd_s_data, prepd_p_data, calibrated_data, freqs], pfile, protocol=pickle.HIGHEST_PROTOCOL)
-		with open(outpcm, "wb") as pfile:
-			pickle.dump([receiver_params, receiver_param_errs, freqs], pfile, protocol=pickle.HIGHEST_PROTOCOL)'''
-		exit(0)
-
-	if usepickle:
-		try:
-			with open("puppi_56165_1713+0747_0708.TT.FR.pickle", "rb") as f:
-				loaded = pickle.load(f)
-				print len(loaded)
-				prepd_s_data, prepd_p_data, calibrated_data, valid_chans, receiver_params, receiver_param_errs = loaded
-				f.close()
-		except IOError:
-			prepd_s_data, prepd_p_data, calibrated_data, valid_chans, receiver_params, receiver_param_errs = get_mtm_solution(files[0], files[1], verbose)
-		s_is, s_qs, s_us, s_vs = prepd_s_data
-		p_is, p_qs, p_us, p_vs = prepd_p_data
-		bw = 800.0
-		nchan = len(np.sum(s_is,axis=1))
-		chan_bw = 800.0/nchan
-		calibrated_is, calibrated_qs, calibrated_us, calibrated_vs = calibrated_data
-		freqs = np.linspace(cfreq+400-(chan_bw/2.0),cfreq-400+(chan_bw/2.0),nchan)
-		outpickle_name = ".".join(files[-1].split(".") + ["pickle"])
-		outpickle = open(outpickle_name, "wb")
-		pickle.dump([prepd_s_data, prepd_p_data, calibrated_data, freqs, receiver_params], outpickle, protocol=pickle.HIGHEST_PROTOCOL)
-		outpickle.close()
-	else:
-		prepd_s_data, prepd_p_data, calibrated_data, valid_chans, receiver_params, receiver_param_errs = get_mtm_solution(files[0], files[1], verbose)
-		receiver_params, receiver_param_errs, calibrated_data, valid_chans = clean_receiver_params(receiver_params, receiver_param_errs, calibrated_data, valid_chans)
-		s_is, s_qs, s_us, s_vs = prepd_s_data
-		p_is, p_qs, p_us, p_vs = prepd_p_data
-		calibrated_is, calibrated_qs, calibrated_us, calibrated_vs = calibrated_data
-		bw = 800.0
-		nchan = len(np.sum(s_is,axis=1))
-		chan_bw = 800.0/nchan
-		calibrated_is, calibrated_qs, calibrated_us, calibrated_vs = calibrated_data
-		freqs = np.linspace(cfreq+400-(chan_bw/2.0),cfreq-400+(chan_bw/2.0),nchan)
-		
-		outpickle_name = ".".join(files[-1].split(".") + ["pickle"])
-		outcal = ".".join(files[-1].split(".") + ["calibpickle"])
-		outpcm = ".".join(files[-1].split(".") + ["pcmpickle"])
+		exit(0)	
+	
+	#Perform the METM method on the input data files
+	prepd_s_data, prepd_p_data, calibrated_data, valid_chans, receiver_params, receiver_param_errs = get_mtm_solution(files[0], files[1], verbose)
+	
+	#Clean the resulting rcvr params
+	receiver_params, receiver_param_errs, calibrated_data, valid_chans = clean_receiver_params(receiver_params, receiver_param_errs, calibrated_data, valid_chans)
+	s_is, s_qs, s_us, s_vs = prepd_s_data
+	p_is, p_qs, p_us, p_vs = prepd_p_data
+	
+	#Prepare to write out the data
+	calibrated_is, calibrated_qs, calibrated_us, calibrated_vs = calibrated_data
+	
+	#This might not be correct for other people, but this code was not written to be universally
+	#compatible, so people can change things as they see fit.
+	bw = 800.0
+	nchan = len(np.sum(s_is,axis=1))
+	chan_bw = 800.0/nchan
+	calibrated_is, calibrated_qs, calibrated_us, calibrated_vs = calibrated_data
+	freqs = np.linspace(cfreq+400-(chan_bw/2.0),cfreq-400+(chan_bw/2.0),nchan)
+	
+	#Prepare to write out the data in pickle format
+	outpickle_name = ".".join(files[-1].split(".") + ["pickle"])
+	outcal = ".".join(files[-1].split(".") + ["calibpickle"])
+	outpcm = ".".join(files[-1].split(".") + ["pcmpickle"])
+	
+	#Try writing the data using pickle
+	try:
 		with  open(outpickle_name, "wb") as pfile:
 			pickle.dump([prepd_s_data, prepd_p_data, calibrated_data, freqs, receiver_params, receiver_param_errs], pfile, protocol=pickle.HIGHEST_PROTOCOL)
 		with open(outcal, "wb") as pfile:
 			pickle.dump([prepd_s_data, prepd_p_data, calibrated_data, freqs], pfile, protocol=pickle.HIGHEST_PROTOCOL)
 		with open(outpcm, "wb") as pfile:
 			pickle.dump([receiver_params, receiver_param_errs, freqs], pfile, protocol=pickle.HIGHEST_PROTOCOL)
+	except Exception as e:
+		print "Could not write pickle files. Threw error:"
+		print str(e)
 	
+	#Write out the rcvr solution to a file
 	write_pcm(files[0], receiver_params, valid_chans, outname, fake=fake)
-
+	
+	#If the user wants to plot the rcvr solution, do it.
 	if noplot: exit(0)
 	nplots = 0
 	if nplots == 0:
@@ -711,28 +775,5 @@ if __name__ == "__main__":
 		axarr[i,plot].errorbar(freqs[valid_chans], receiver_params[valid_chans,5], yerr = receiver_param_errs[valid_chans,5], fmt='k_')
 		axarr[i,plot].set_ylabel("Gamma")
 		i += 1
-
-	axarr[nplots-1, plot].set_xlabel("Frequency (MHz)")
-	plt.figure(0)
-	plt.plot(np.sum(s_is, axis=0), "k-")
-	plt.plot(np.sum(s_qs, axis=0), "r-")
-	plt.plot(np.sum(s_us, axis=0), "g-")
-	plt.plot(np.sum(s_vs, axis=0), "b-")
-	plt.plot(np.sum(p_is, axis=0), "c--")
-	plt.plot(np.sum(p_qs, axis=0), "m--")
-	plt.plot(np.sum(p_us, axis=0), "y--")
-	plt.plot(np.sum(p_vs, axis=0), "k--")
-	plt.title("Precal")
-	#plt.plot(on_indices,[0]*len(on_indices),"r*")
-	plt.figure(2)
-	plt.plot(np.sum(s_is, axis=0), "k-")
-	plt.plot(np.sum(s_qs, axis=0), "r-")
-	plt.plot(np.sum(s_us, axis=0), "g-")
-	plt.plot(np.sum(s_vs, axis=0), "b-")
-	plt.plot(np.sum(calibrated_is, axis=0), "c--")
-	plt.plot(np.sum(calibrated_qs, axis=0), "m--")
-	plt.plot(np.sum(calibrated_us, axis=0), "y--")
-	plt.plot(np.sum(calibrated_vs, axis=0), "k--")
-	plt.title("Postcal")
 	plt.show()
 
